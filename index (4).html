@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Calculadora de valor de imóvel</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #0e1a20; }
+  #root { min-height: 100vh; display: flex; align-items: flex-start; justify-content: center; padding: 24px 0; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script crossorigin src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7/babel.min.js"></script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useMemo } = React;
+
+const CAPITAIS = {
+  SP: "São Paulo", RJ: "Rio de Janeiro", DF: "Brasília", SC: "Florianópolis",
+  PR: "Curitiba", RS: "Porto Alegre", MG: "Belo Horizonte", ES: "Vitória",
+  BA: "Salvador", PE: "Recife", CE: "Fortaleza", GO: "Goiânia", MT: "Cuiabá",
+  MS: "Campo Grande", AM: "Manaus", PA: "Belém", MA: "São Luís", PI: "Teresina",
+  RN: "Natal", PB: "João Pessoa", AL: "Maceió", SE: "Aracaju", TO: "Palmas",
+  RO: "Porto Velho", AC: "Rio Branco", RR: "Boa Vista", AP: "Macapá",
+};
+
+const PADRAO_MULT = { Popular: 0.65, "Médio": 1.0, "Alto padrão": 1.6, "Luxo": 2.4 };
+const CONSERVACAO_MULT = { "Excelente": 1.05, "Bom": 1.0, "Regular": 0.9, "Precisa de reforma": 0.75 };
+const REFORMA_OPCOES = [
+  { valor: "0", label: "Nenhuma", pct: 0 },
+  { valor: "5", label: "5%", pct: 0.05 },
+  { valor: "10", label: "10%", pct: 0.10 },
+  { valor: "20", label: "20%", pct: 0.20 },
+];
+
+const MELHORIAS = [
+  { key: "piscina", label: "Piscina", pct: 0.06 },
+  { key: "gourmet", label: "Área gourmet / churrasqueira", pct: 0.03 },
+  { key: "elevador", label: "Elevador no prédio", pct: 0.02 },
+  { key: "vista", label: "Vista privilegiada", pct: 0.05 },
+  { key: "seguranca", label: "Portaria 24h / segurança", pct: 0.03 },
+  { key: "solar", label: "Energia solar", pct: 0.02 },
+];
+
+const BASE_YEAR = 2024;
+const VALORIZACAO_ANUAL = 0.06;
+
+function brl(n) {
+  const valor = Number(n);
+  return (Number.isFinite(valor) ? valor : 0).toLocaleString("pt-BR", { style: "currency", currency: "BRL", maximumFractionDigits: 0 });
+}
+
+// ---- geração de PDF sem dependências externas ----
+const PDF_CHAR_MAP = { "\u2014": 0x97, "\u2013": 0x96, "\u2018": 0x91, "\u2019": 0x92, "\u201C": 0x93, "\u201D": 0x94, "\u2026": 0x85 };
+
+function pdfLatin1Bytes(str) {
+  const bytes = [];
+  for (const ch of String(str)) {
+    if (PDF_CHAR_MAP[ch] !== undefined) { bytes.push(PDF_CHAR_MAP[ch]); continue; }
+    const cp = ch.codePointAt(0);
+    bytes.push(cp <= 255 ? cp : 0x3f);
+  }
+  return bytes;
+}
+function pdfEscapeBytes(bytes) {
+  const out = [];
+  for (const b of bytes) {
+    if (b === 0x5c || b === 0x28 || b === 0x29) out.push(0x5c);
+    out.push(b);
+  }
+  return out;
+}
+function pdfAscii(str) {
+  return Array.from(str).map((c) => c.charCodeAt(0));
+}
+function pdfWrapText(text, maxChars) {
+  const words = text.split(" ");
+  const lines = [];
+  let cur = "";
+  for (const w of words) {
+    const test = cur ? cur + " " + w : w;
+    if (test.length > maxChars) {
+      if (cur) lines.push(cur);
+      cur = w;
+    } else {
+      cur = test;
+    }
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+function buildPdfBytes(lines) {
+  let contentOps = [];
+  for (const l of lines) {
+    const fontName = l.font === "bold" ? "/F2" : "/F1";
+    const escaped = pdfEscapeBytes(pdfLatin1Bytes(l.text));
+    contentOps = contentOps.concat(
+      pdfAscii(`BT ${fontName} ${l.size} Tf 1 0 0 1 ${l.x} ${l.y} Tm (`),
+      escaped,
+      pdfAscii(`) Tj ET\n`)
+    );
+  }
+  const streamHeader = pdfAscii(`<< /Length ${contentOps.length} >>\nstream\n`);
+  const streamFooter = pdfAscii(`\nendstream\nendobj\n`);
+
+  const objs = [
+    pdfAscii(`1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n`),
+    pdfAscii(`2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n`),
+    pdfAscii(`3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R /F2 5 0 R >> >> /Contents 6 0 R >>\nendobj\n`),
+    pdfAscii(`4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>\nendobj\n`),
+    pdfAscii(`5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>\nendobj\n`),
+    [].concat(pdfAscii(`6 0 obj\n`), streamHeader, contentOps, streamFooter),
+  ];
+
+  let bytes = pdfAscii(`%PDF-1.4\n`).concat([0x25, 0xe2, 0xe3, 0xcf, 0xd3, 0x0a]);
+  const offsets = [];
+  for (const o of objs) {
+    offsets.push(bytes.length);
+    bytes = bytes.concat(o);
+  }
+  const xrefOffset = bytes.length;
+  let xref = `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n`;
+  for (const off of offsets) xref += String(off).padStart(10, "0") + " 00000 n \n";
+  bytes = bytes.concat(pdfAscii(xref));
+  const trailer = `trailer\n<< /Size ${objs.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
+  bytes = bytes.concat(pdfAscii(trailer));
+  return new Uint8Array(bytes);
+}
+
+function CalculadoraValorImovel() {
+  const [tipo, setTipo] = useState("Apartamento");
+  const [uf, setUf] = useState("SP");
+  const [cidade, setCidade] = useState("");
+  const [bairro, setBairro] = useState("");
+  const [padrao, setPadrao] = useState("Médio");
+  const [areaConstruida, setAreaConstruida] = useState("");
+  const [areaTerreno, setAreaTerreno] = useState("");
+  const [quartos, setQuartos] = useState("");
+  const [banheiros, setBanheiros] = useState("");
+  const [garagem, setGaragem] = useState("");
+  const [idade, setIdade] = useState("");
+  const [conservacao, setConservacao] = useState("Bom");
+  const [reformaPct, setReformaPct] = useState("0");
+  const [melhorias, setMelhorias] = useState({});
+
+  const [precoMin, setPrecoMin] = useState(2500);
+  const [precoMedio, setPrecoMedio] = useState(3500);
+  const [precoMax, setPrecoMax] = useState(4500);
+
+  const [tentouCalcular, setTentouCalcular] = useState(false);
+  const [mostrarResultado, setMostrarResultado] = useState(false);
+
+  const isTerreno = tipo === "Terreno";
+
+  function toggleMelhoria(key) {
+    setMelhorias((m) => ({ ...m, [key]: !m[key] }));
+  }
+
+  const camposFaltando = useMemo(() => {
+    const faltando = [];
+    if (!cidade.trim()) faltando.push("cidade");
+    if (!bairro.trim()) faltando.push("bairro");
+    if (isTerreno) {
+      if (areaTerreno === "" || +areaTerreno <= 0) faltando.push("areaTerreno");
+    } else {
+      if (areaConstruida === "" || +areaConstruida <= 0) faltando.push("areaConstruida");
+      if (quartos === "") faltando.push("quartos");
+      if (banheiros === "") faltando.push("banheiros");
+      if (garagem === "") faltando.push("garagem");
+      if (idade === "") faltando.push("idade");
+    }
+    const min = Number(precoMin), medio = Number(precoMedio), max = Number(precoMax);
+    if (!Number.isFinite(min) || !Number.isFinite(medio) || !Number.isFinite(max) || min <= 0 || medio <= 0 || max <= 0 || min > medio || medio > max) faltando.push("precos");
+    return faltando;
+  }, [cidade, bairro, isTerreno, areaTerreno, areaConstruida, quartos, banheiros, garagem, idade, precoMin, precoMedio, precoMax]);
+
+  const valido = camposFaltando.length === 0;
+
+  function pctLinha(v) {
+    const s = (v * 100).toFixed(1).replace(".", ",");
+    return (v >= 0 ? "+" : "") + s + "%";
+  }
+
+  const resultado = useMemo(() => {
+    const anoAtual = new Date().getFullYear();
+    const anos = Math.max(0, anoAtual - BASE_YEAR);
+    const fatorValorizacao = Math.pow(1 + VALORIZACAO_ANUAL, anos);
+
+    const padraoMult = PADRAO_MULT[padrao] || 1;
+    const capitalBonus = cidade.trim().toLowerCase() === (CAPITAIS[uf] || "").toLowerCase() ? 1.1 : 1.0;
+    const reformaInfo = REFORMA_OPCOES.find((r) => r.valor === reformaPct) || REFORMA_OPCOES[0];
+
+    const linhas = [];
+    const area = isTerreno ? +areaTerreno || 0 : +areaConstruida || 0;
+
+    // fator combinado: tudo além do preço-base por m² e da área
+    let fator = padraoMult * capitalBonus;
+
+    if (!isTerreno) {
+      const bonusQuartos = Math.max(0, (+quartos || 0) - 2) * 0.012;
+      const bonusBanheiros = Math.max(0, (+banheiros || 0) - 1) * 0.015;
+      const bonusGaragem = (+garagem || 0) * 0.02;
+      const conservMult = CONSERVACAO_MULT[conservacao] || 1;
+      const depreciacao = Math.min(0.2, (+idade || 0) * 0.005) * (reformaInfo.pct > 0 ? 0.5 : 1);
+
+      let melhoriasPct = reformaInfo.pct;
+      MELHORIAS.forEach((m) => {
+        if (melhorias[m.key]) melhoriasPct += m.pct;
+      });
+
+      fator *= 1 + bonusQuartos + bonusBanheiros + bonusGaragem + melhoriasPct;
+      fator *= conservMult;
+      fator *= 1 - depreciacao;
+
+      linhas.push(["Cômodos e vagas (quartos, banheiros, garagem)", pctLinha(bonusQuartos + bonusBanheiros + bonusGaragem)]);
+      if (melhoriasPct > 0) linhas.push(["Melhorias e reforma declaradas", pctLinha(melhoriasPct)]);
+      linhas.push([`Conservação (${conservacao})`, pctLinha(conservMult - 1)]);
+      if (depreciacao > 0) linhas.push([`Depreciação por idade (${idade || 0} anos)`, pctLinha(-depreciacao)]);
+    }
+
+    linhas.push(["Padrão do bairro" + (capitalBonus > 1 ? " e capital do estado" : ""), pctLinha(padraoMult * capitalBonus - 1)]);
+    linhas.push([`Atualização de mercado (${(VALORIZACAO_ANUAL * 100).toFixed(0)}% a.a. desde ${BASE_YEAR})`, pctLinha(fatorValorizacao - 1)]);
+
+    fator *= fatorValorizacao;
+
+    const valorFinal = (+precoMedio || 0) * area * fator;
+    const min = (+precoMin || 0) * area * fator;
+    const max = (+precoMax || 0) * area * fator;
+
+    const valorM2 = area > 0 ? valorFinal / area : 0;
+    const projecao = [1, 3, 5].map((n) => ({
+      anos: n,
+      valor: valorFinal * Math.pow(1 + VALORIZACAO_ANUAL, n),
+    }));
+
+    return { valorFinal, min, max, linhas, valorM2, projecao, area, fator, baseM2: +precoMedio || 0 };
+  }, [tipo, uf, cidade, padrao, areaConstruida, areaTerreno, quartos, banheiros, garagem, idade, conservacao, reformaPct, melhorias, isTerreno, precoMin, precoMedio, precoMax]);
+
+  const maxProjecao = Math.max(...resultado.projecao.map((p) => p.valor), resultado.valorFinal || 0, 1);
+
+  function req(nomeCampo) {
+    return tentouCalcular && camposFaltando.includes(nomeCampo);
+  }
+
+  const pdfDataUrl = useMemo(() => {
+    if (!mostrarResultado || !valido) return null;
+
+    const linhasPdf = [];
+    let y = 780;
+    const add = (text, size, font = "normal", gap = 16) => {
+      linhasPdf.push({ text, x: 50, y, size, font });
+      y -= gap;
+    };
+
+    add("Certidão de avaliação estimada", 10, "normal", 20);
+    add(`${tipo} · ${padrao}`, 15, "bold", 18);
+    add([bairro, cidade || CAPITAIS[uf], uf].filter(Boolean).join(", "), 10, "normal", 30);
+
+    add("VALOR DE MERCADO ESTIMADO (M² MÉDIO)", 9, "normal", 26);
+    add(brl(resultado.valorFinal), 24, "bold", 20);
+    add(`Faixa: ${brl(resultado.min)} (mínimo) — ${brl(resultado.max)} (máximo)`, 10, "normal", 30);
+
+    resultado.linhas.forEach(([label, v]) => add(`${label}: ${v}`, 9.5, "normal", 15));
+    y -= 8;
+    add(`Valor por m² (médio): ${brl(resultado.valorM2)}`, 10.5, "normal", 26);
+
+    add("Projeção de valorização (6% a.a.)", 9.5, "bold", 15);
+    resultado.projecao.forEach((p) =>
+      add(`${p.anos} ${p.anos === 1 ? "ano" : "anos"}: ${brl(p.valor)}`, 9.5, "normal", 15)
+    );
+
+    y -= 10;
+    const disclaimer =
+      "Estimativa calculada por heurística própria com base nos valores de m² informados, localização, padrão do bairro, características declaradas e valorização média de mercado — não substitui o valor venal oficial da prefeitura nem um laudo de avaliação profissional (ABNT NBR 14653).";
+    pdfWrapText(disclaimer, 95).forEach((linha) => add(linha, 8, "normal", 12));
+
+    const bytes = buildPdfBytes(linhasPdf);
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    const base64 = btoa(binary);
+    return `data:application/pdf;base64,${base64}`;
+  }, [mostrarResultado, valido, resultado, tipo, padrao, bairro, cidade, uf]);
+
+
+  return (
+    <div className="wrap">
+      <style>{`
+        .wrap {
+          --ink: #16242B;
+          --paper: #EDE8DC;
+          --paper-line: #C9BFA9;
+          --brass: #93712E;
+          --brass-light: #C9A24B;
+          --sage: #47614F;
+          --danger: #8C4A3A;
+          font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+          background: var(--ink);
+          color: var(--paper);
+          padding: 28px 20px 40px;
+          border-radius: 4px;
+          max-width: 980px;
+          margin: 0 auto;
+        }
+        .wrap * { box-sizing: border-box; }
+        .titulo { font-family: Georgia, "Iowan Old Style", serif; font-size: 28px; margin: 0 0 4px; }
+        .subtitulo { font-size: 14px; color: #C7CDCB; margin: 0 0 24px; max-width: 60ch; line-height: 1.5; }
+        .grid { display: grid; grid-template-columns: 1fr; gap: 22px; }
+        @media (min-width: 760px) { .grid { grid-template-columns: 1.05fr 1fr; align-items: start; } }
+        .form-card { background: var(--paper); color: var(--ink); border-radius: 3px; padding: 22px 22px 26px; }
+        .form-section-title {
+          font-size: 12.5px; font-weight: 600; color: var(--brass);
+          margin: 18px 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--paper-line);
+        }
+        .form-section-title:first-child { margin-top: 0; }
+        .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 10px; }
+        .field-row.tres { grid-template-columns: 1fr 1fr 1fr; }
+        .field { display: flex; flex-direction: column; gap: 4px; }
+        .field label { font-size: 12px; color: #4A5A52; }
+        .field label .req { color: var(--danger); margin-left: 2px; }
+        .field input, .field select {
+          font-family: inherit; font-size: 14px; padding: 8px 9px;
+          border: 1px solid var(--paper-line); border-radius: 2px; background: #F7F4EC; color: var(--ink);
+        }
+        .field input.erro, .field select.erro { border-color: var(--danger); background: #F7ECE9; }
+        .field input:focus, .field select:focus { outline: 2px solid var(--brass-light); outline-offset: 1px; }
+        .campo-prefixo { position: relative; }
+        .campo-prefixo span {
+          position: absolute; left: 9px; top: 8px; font-size: 14px; color: #6B7A72; pointer-events: none;
+        }
+        .campo-prefixo input { padding-left: 26px; }
+        .melhorias-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; }
+        .melhoria-item { display: flex; align-items: center; gap: 7px; font-size: 13px; padding: 4px 0; }
+        .melhoria-item input { accent-color: var(--brass); }
+        .btn-calcular {
+          margin-top: 18px; width: 100%; padding: 11px; font-size: 14px; font-weight: 600;
+          background: var(--brass); color: #FBF7EE; border: none; border-radius: 2px; cursor: pointer;
+        }
+        .btn-calcular:hover { background: var(--brass-light); }
+        .btn-limpar { margin-top: 8px; width: 100%; padding: 9px; font-size: 12.5px; background: transparent; color: var(--ink); border: 1px solid var(--paper-line); border-radius: 2px; cursor: pointer; }
+        .btn-limpar:hover { border-color: var(--brass); color: var(--brass); }
+        .aviso-obrigatorio {
+          margin-top: 10px; font-size: 12.5px; color: var(--danger);
+          background: #F7ECE9; border: 1px solid var(--danger); border-radius: 2px; padding: 8px 10px;
+        }
+        .deed { background: var(--paper); color: var(--ink); border-radius: 3px; padding: 26px 24px 22px; position: relative; overflow: hidden; }
+        .deed::before {
+          content: ""; position: absolute; top: 0; right: 0; width: 70px; height: 70px;
+          background: var(--brass); clip-path: polygon(100% 0, 0 0, 100% 100%); opacity: 0.9;
+        }
+        .deed-eyebrow { font-family: Georgia, "Iowan Old Style", serif; font-style: italic; font-size: 13px; color: var(--brass); margin: 0 0 2px; }
+        .deed-heading { font-family: Georgia, "Iowan Old Style", serif; font-size: 15px; margin: 0 0 18px; color: #4A5A52; }
+        .deed-address { font-size: 13px; color: #5A6A62; margin-bottom: 4px; }
+        .valor-central { text-align: center; padding: 14px 0 10px; border-top: 1px solid var(--paper-line); border-bottom: 1px solid var(--paper-line); margin: 14px 0 16px; }
+        .valor-label { font-size: 12px; color: #4A5A52; margin-bottom: 6px; }
+        .valor-numero { font-family: Georgia, "Iowan Old Style", serif; font-size: 38px; line-height: 1.1; color: var(--ink); }
+        .valor-faixa { font-size: 12.5px; color: #5A6A62; margin-top: 8px; }
+        .ledger-row { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; padding: 6px 0; border-bottom: 1px dotted var(--paper-line); }
+        .ledger-row:last-child { border-bottom: none; }
+        .ledger-label { color: #4A5A52; }
+        .ledger-valor { font-variant-numeric: tabular-nums; white-space: nowrap; }
+        .stat-row { display: flex; justify-content: space-between; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--paper-line); }
+        .stat { text-align: left; }
+        .stat-label { font-size: 11.5px; color: #4A5A52; }
+        .stat-valor { font-size: 16px; font-family: Georgia, serif; margin-top: 2px; }
+        .projecao-title { font-size: 12px; color: var(--brass); margin: 20px 0 8px; }
+        .barra-row { display: flex; align-items: center; gap: 10px; margin-bottom: 7px; font-size: 12.5px; }
+        .barra-anos { width: 46px; color: #4A5A52; flex-shrink: 0; }
+        .barra-trilho { flex: 1; background: var(--paper-line); border-radius: 2px; height: 8px; overflow: hidden; }
+        .barra-fill { height: 100%; background: var(--sage); border-radius: 2px; }
+        .barra-valor { width: 92px; text-align: right; color: var(--ink); flex-shrink: 0; }
+        .aviso { margin-top: 18px; font-size: 11.5px; color: #6B6255; line-height: 1.5; border-top: 1px solid var(--paper-line); padding-top: 12px; }
+        .deed-vazio { display: flex; align-items: center; justify-content: center; text-align: center; min-height: 320px; color: #5A6A62; font-size: 14px; padding: 20px; }
+
+        @media (max-width: 480px) {
+          .wrap { padding: 18px 12px 28px; border-radius: 0; }
+          .titulo { font-size: 21px; }
+          .subtitulo { font-size: 12.5px; margin-bottom: 18px; }
+          .form-card { padding: 16px 14px 18px; }
+          .deed { padding: 20px 16px 16px; }
+          .form-section-title { font-size: 11.5px; margin: 14px 0 8px; }
+          .field-row, .field-row.tres { grid-template-columns: 1fr; gap: 8px; margin-bottom: 6px; }
+          .field label { font-size: 11.5px; }
+          .field input, .field select { font-size: 16px; padding: 9px 8px; }
+          .melhorias-grid { grid-template-columns: 1fr; gap: 2px; }
+          .melhoria-item { font-size: 12.5px; padding: 5px 0; }
+          .btn-calcular { padding: 12px; font-size: 13.5px; }
+          .deed-eyebrow { font-size: 12px; }
+          .deed-heading { font-size: 13.5px; margin-bottom: 12px; }
+          .deed-address { font-size: 12px; }
+          .deed::before { width: 46px; height: 46px; }
+          .valor-central { padding: 10px 0 8px; margin: 10px 0 12px; }
+          .valor-numero { font-size: 27px; word-break: break-word; }
+          .valor-label { font-size: 11px; }
+          .valor-faixa { font-size: 11px; }
+          .ledger-row { font-size: 12px; gap: 8px; padding: 5px 0; }
+          .stat-row { flex-direction: column; gap: 10px; margin-top: 12px; padding-top: 10px; }
+          .stat-valor { font-size: 14.5px; }
+          .projecao-title { font-size: 11px; margin: 16px 0 6px; }
+          .barra-row { gap: 6px; font-size: 11px; }
+          .barra-anos { width: 36px; }
+          .barra-valor { width: 74px; }
+          .aviso { font-size: 10.5px; }
+          .aviso-obrigatorio { font-size: 11.5px; }
+          .deed-vazio { min-height: 160px; font-size: 12.5px; }
+        }
+        .btn-pdf {
+          margin-top: 16px; width: 100%; padding: 11px; font-size: 13.5px; font-weight: 600;
+          background: transparent; color: var(--ink); border: 1px solid var(--ink); border-radius: 2px; cursor: pointer;
+          display: block; text-align: center; text-decoration: none; box-sizing: border-box;
+        }
+        .btn-pdf:hover { background: var(--ink); color: var(--paper); }
+      `}</style>
+
+      <h1 className="titulo">Calculadora de valor de imóvel</h1>
+      <p className="subtitulo">
+        Preencha todos os campos abaixo para obter uma estimativa de valor de mercado,
+        com faixa mínima, média e máxima conforme o valor do m² informado.
+      </p>
+
+      <div className="grid">
+        <div className="form-card">
+          <div className="form-section-title">Localização</div>
+          <div className="field-row">
+            <div className="field">
+              <label>Tipo de imóvel<span className="req">*</span></label>
+              <select value={tipo} onChange={(e) => { setTipo(e.target.value); setMostrarResultado(false); }} required>
+                <option>Apartamento</option>
+                <option>Casa</option>
+                <option>Terreno</option>
+              </select>
+            </div>
+            <div className="field">
+              <label>Estado<span className="req">*</span></label>
+              <select value={uf} onChange={(e) => { setUf(e.target.value); setMostrarResultado(false); }} required>
+                {Object.keys(CAPITAIS).map((k) => (
+                  <option key={k} value={k}>{k}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <div className="field-row">
+            <div className="field">
+              <label>Cidade<span className="req">*</span></label>
+              <input
+                className={req("cidade") ? "erro" : ""}
+                value={cidade}
+                onChange={(e) => { setCidade(e.target.value); setMostrarResultado(false); }}
+                placeholder={CAPITAIS[uf]}
+                required
+              />
+            </div>
+            <div className="field">
+              <label>Bairro<span className="req">*</span></label>
+              <input
+                className={req("bairro") ? "erro" : ""}
+                value={bairro}
+                onChange={(e) => { setBairro(e.target.value); setMostrarResultado(false); }}
+                placeholder="Ex: Centro"
+                required
+              />
+            </div>
+          </div>
+          <div className="field-row">
+            <div className="field">
+              <label>Padrão do bairro<span className="req">*</span></label>
+              <select value={padrao} onChange={(e) => { setPadrao(e.target.value); setMostrarResultado(false); }} required>
+                {Object.keys(PADRAO_MULT).map((k) => <option key={k}>{k}</option>)}
+              </select>
+            </div>
+            <div className="field">
+              {isTerreno ? (
+                <>
+                  <label>Área do terreno (m²)<span className="req">*</span></label>
+                  <input
+                    className={req("areaTerreno") ? "erro" : ""}
+                    type="number" min="0" value={areaTerreno}
+                    onChange={(e) => { setAreaTerreno(e.target.value); setMostrarResultado(false); }}
+                    required
+                  />
+                </>
+              ) : (
+                <>
+                  <label>Área construída (m²)<span className="req">*</span></label>
+                  <input
+                    className={req("areaConstruida") ? "erro" : ""}
+                    type="number" min="0" value={areaConstruida}
+                    onChange={(e) => { setAreaConstruida(e.target.value); setMostrarResultado(false); }}
+                    required
+                  />
+                </>
+              )}
+            </div>
+          </div>
+
+          <div className="form-section-title">Valor do m² (editável)</div>
+          <div className="field-row tres">
+            <div className="field">
+              <label>Mínimo<span className="req">*</span></label>
+              <div className="campo-prefixo">
+                <span>R$</span>
+                <input
+                  className={req("precos") ? "erro" : ""}
+                  type="number" min="0" value={precoMin}
+                  onChange={(e) => { setPrecoMin(e.target.value); setMostrarResultado(false); }}
+                  required
+                />
+              </div>
+            </div>
+            <div className="field">
+              <label>Médio<span className="req">*</span></label>
+              <div className="campo-prefixo">
+                <span>R$</span>
+                <input
+                  className={req("precos") ? "erro" : ""}
+                  type="number" min="0" value={precoMedio}
+                  onChange={(e) => { setPrecoMedio(e.target.value); setMostrarResultado(false); }}
+                  required
+                />
+              </div>
+            </div>
+            <div className="field">
+              <label>Máximo<span className="req">*</span></label>
+              <div className="campo-prefixo">
+                <span>R$</span>
+                <input
+                  className={req("precos") ? "erro" : ""}
+                  type="number" min="0" value={precoMax}
+                  onChange={(e) => { setPrecoMax(e.target.value); setMostrarResultado(false); }}
+                  required
+                />
+              </div>
+            </div>
+          </div>
+
+          {!isTerreno && (
+            <>
+              <div className="form-section-title">Características</div>
+              <div className="field-row">
+                <div className="field">
+                  <label>Quartos<span className="req">*</span></label>
+                  <input
+                    className={req("quartos") ? "erro" : ""}
+                    type="number" min="0" value={quartos}
+                    onChange={(e) => { setQuartos(e.target.value); setMostrarResultado(false); }}
+                    required
+                  />
+                </div>
+                <div className="field">
+                  <label>Banheiros<span className="req">*</span></label>
+                  <input
+                    className={req("banheiros") ? "erro" : ""}
+                    type="number" min="0" value={banheiros}
+                    onChange={(e) => { setBanheiros(e.target.value); setMostrarResultado(false); }}
+                    required
+                  />
+                </div>
+              </div>
+              <div className="field-row">
+                <div className="field">
+                  <label>Vagas de garagem<span className="req">*</span></label>
+                  <input
+                    className={req("garagem") ? "erro" : ""}
+                    type="number" min="0" value={garagem}
+                    onChange={(e) => { setGaragem(e.target.value); setMostrarResultado(false); }}
+                    required
+                  />
+                </div>
+                <div className="field">
+                  <label>Idade do imóvel (anos)<span className="req">*</span></label>
+                  <input
+                    className={req("idade") ? "erro" : ""}
+                    type="number" min="0" value={idade}
+                    onChange={(e) => { setIdade(e.target.value); setMostrarResultado(false); }}
+                    required
+                  />
+                </div>
+              </div>
+              <div className="field-row">
+                <div className="field">
+                  <label>Estado de conservação<span className="req">*</span></label>
+                  <select value={conservacao} onChange={(e) => { setConservacao(e.target.value); setMostrarResultado(false); }} required>
+                    {Object.keys(CONSERVACAO_MULT).map((k) => <option key={k}>{k}</option>)}
+                  </select>
+                </div>
+                <div className="field">
+                  <label>Percentual de reforma<span className="req">*</span></label>
+                  <select value={reformaPct} onChange={(e) => { setReformaPct(e.target.value); setMostrarResultado(false); }} required>
+                    {REFORMA_OPCOES.map((r) => (
+                      <option key={r.valor} value={r.valor}>{r.label}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="form-section-title">Melhorias adicionais</div>
+              <div className="melhorias-grid">
+                {MELHORIAS.map((m) => (
+                  <label className="melhoria-item" key={m.key}>
+                    <input
+                      type="checkbox"
+                      checked={!!melhorias[m.key]}
+                      onChange={() => { toggleMelhoria(m.key); setMostrarResultado(false); }}
+                    />
+                    {m.label}
+                  </label>
+                ))}
+              </div>
+            </>
+          )}
+
+          <button
+            className="btn-calcular"
+            onClick={() => {
+              setTentouCalcular(true);
+              setMostrarResultado(valido);
+            }}
+          >
+            Calcular valor estimado
+          </button>
+          <button className="btn-limpar" type="button" onClick={() => {
+            setCidade(""); setBairro(""); setAreaConstruida(""); setAreaTerreno("");
+            setQuartos(""); setBanheiros(""); setGaragem(""); setIdade("");
+            setMelhorias({}); setTentouCalcular(false); setMostrarResultado(false);
+          }}>Limpar campos</button>
+          {tentouCalcular && !valido && (
+            <p className="aviso-obrigatorio">
+              Preencha os campos obrigatórios. Confira também se os valores estão em ordem: mínimo ≤ médio ≤ máximo.
+            </p>
+          )}
+        </div>
+
+        {mostrarResultado && valido ? (
+          <div className="deed">
+            <p className="deed-eyebrow">Certidão de avaliação estimada</p>
+            <p className="deed-heading">{tipo} · {padrao}</p>
+            <p className="deed-address">{[bairro, cidade || CAPITAIS[uf], uf].filter(Boolean).join(", ")}</p>
+
+            <div className="valor-central">
+              <div className="valor-label">Valor de mercado estimado (m² médio)</div>
+              <div className="valor-numero">{brl(resultado.valorFinal)}</div>
+              <div className="valor-faixa">Faixa: {brl(resultado.min)} (mínimo) — {brl(resultado.max)} (máximo)</div>
+            </div>
+
+            <div>
+              {resultado.linhas.map(([label, v], i) => (
+                <div className="ledger-row" key={i}>
+                  <span className="ledger-label">{label}</span>
+                  <span className="ledger-valor">{v}</span>
+                </div>
+              ))}
+            </div>
+
+            <div className="stat-row">
+              <div className="stat">
+                <div className="stat-label">Área considerada</div>
+                <div className="stat-valor">{resultado.area.toLocaleString("pt-BR")} m²</div>
+              </div>
+              <div className="stat">
+                <div className="stat-label">Valor por m² ajustado</div>
+                <div className="stat-valor">{brl(resultado.valorM2)}</div>
+              </div>
+              <div className="stat">
+                <div className="stat-label">Fator total aplicado</div>
+                <div className="stat-valor">{resultado.fator.toFixed(2).replace(".", ",")}×</div>
+              </div>
+            </div>
+
+            <p className="projecao-title">Projeção de valorização (6% a.a.)</p>
+            {resultado.projecao.map((p) => (
+              <div className="barra-row" key={p.anos}>
+                <span className="barra-anos">{p.anos} {p.anos === 1 ? "ano" : "anos"}</span>
+                <div className="barra-trilho">
+                  <div className="barra-fill" style={{ width: `${(p.valor / maxProjecao) * 100}%` }} />
+                </div>
+                <span className="barra-valor">{brl(p.valor)}</span>
+              </div>
+            ))}
+
+            <p className="aviso">
+              Estimativa calculada por heurística própria com base nos valores de m² informados,
+              localização, padrão do bairro, características declaradas e valorização média de
+              mercado — não substitui o valor venal oficial da prefeitura nem um laudo de
+              avaliação profissional (ABNT NBR 14653).
+            </p>
+
+            {pdfDataUrl && (
+              <a className="btn-pdf" href={pdfDataUrl} download="certidao-avaliacao-imovel.pdf" target="_blank" rel="noopener noreferrer">
+                Baixar em PDF
+              </a>
+            )}
+          </div>
+        ) : (
+          <div className="deed">
+            <div className="deed-vazio">
+              {tentouCalcular && !valido
+                ? "Faltam campos obrigatórios. Preencha tudo e clique em \"Calcular valor estimado\" novamente."
+                : "Preencha todos os campos obrigatórios e clique em \"Calcular valor estimado\" para gerar a certidão de avaliação."}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<CalculadoraValorImovel />);
+
+</script>
+</body>
+</html>
