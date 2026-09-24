@@ -1,0 +1,13 @@
+CRM IMOBILIARIAS — BETA PWA
+
+Esta e uma versao beta separada. Nao substitua o index.html existente na raiz do repositorio. Para uma futura publicacao sem sobrescrever o site atual, a pasta crm-online-beta pode ser colocada na raiz do repositorio; o endereco sera a subpasta /crm-online-beta/.
+
+A beta usa Supabase para login e funcionalidades de CRM. O HTML contem somente a chave publishable/publica do projeto; nao ha chave service_role no navegador.
+
+O fluxo de convites foi preparado em arquivos separados. Ainda e necessario revisar e aplicar a migration e publicar a Edge Function no projeto antes de usar convites. O pacote de beta sozinho nao habilita convites. O envio usa o template Magic Link/OTP do Supabase, que pode ser personalizado com o texto de convite do CRM. Nao execute SQL nem publique codigo sem revisar e confirmar a configuracao.
+
+A instalacao como app exige publicacao em HTTPS. Antes de publicar, configurar o redirecionamento de convite/recuperacao no Supabase para o endereco final exato, incluindo /crm-online-beta/. Configure a URL APP_BASE_URL da Edge Function com esse mesmo endereco HTTPS.
+
+O prazo do convite no CRM e de ate 1 hora; a validade real do link enviado por e-mail tambem depende da configuracao Email OTP Expiration no Supabase e pode ser menor. A pessoa convidada cria sua propria senha; nunca solicite a senha dela.
+
+Use apenas dados ficticios ate concluir os testes e a revisao de seguranca. Esta beta nao e uma versao de producao; cobranca e armazenamento de logo por imobiliaria nao estao ativados.
